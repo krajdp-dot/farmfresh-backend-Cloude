@@ -179,6 +179,12 @@ const User = mongoose.model('User', UserSchema);
 const Farmer = mongoose.model('Farmer', FarmerSchema);
 const Product = mongoose.model('Product', ProductSchema);
 const Order = mongoose.model('Order', OrderSchema);
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Farm Fresh backend is running 🚀",
+  });
+});
 
 // ════════════════════════════════════════════════════════════
 // AUTH MIDDLEWARE
@@ -201,19 +207,6 @@ const auth = async (req, res, next) => {
 const adminAuth = async (req, res, next) => {
   // Add admin check logic — e.g. user.role === 'admin'
   auth(req, res, next);
-};
-
-// Optional auth — attaches req.user if JWT present, continues either way
-const optionalAuth = async (req, res, next) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.userId);
-      if (user && !user.isBlocked) req.user = user;
-    }
-  } catch { /* no token or invalid — continue as guest */ }
-  next();
 };
 
 // In-memory OTP store (use Redis in production)
@@ -316,26 +309,10 @@ app.get('/api/products/:id', async (req, res) => {
 // ════════════════════════════════════════════════════════════
 
 // POST /api/orders
-app.post('/api/orders', optionalAuth, async (req, res) => {
+app.post('/api/orders', async (req, res) => {
   try {
-    const { items, addressIndex = 0, deliverySlot, paymentMethod, couponCode, phone, customerName, address: inlineAddress, notes } = req.body;
+    const { items, addressIndex = 0, deliverySlot, paymentMethod, couponCode } = req.body;
     if (!items?.length) return res.status(400).json({ error: 'Cart is empty' });
-
-    // ── Guest checkout: find or create user by phone ──
-    if (!req.user) {
-      if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
-        return res.status(400).json({ error: 'Valid phone number required' });
-      }
-      let user = await User.findOne({ phone });
-      if (!user) {
-        user = await User.create({
-          phone,
-          name: customerName || 'Customer',
-          referralCode: Math.random().toString(36).slice(2, 8).toUpperCase(),
-        });
-      }
-      req.user = user;
-    }
 
     let subtotal = 0;
     const validatedItems = [];
@@ -370,10 +347,7 @@ app.post('/api/orders', optionalAuth, async (req, res) => {
 
     const deliveryFee = subtotal >= 399 ? 0 : 29;
     const total = Math.max(0, subtotal - discount + deliveryFee);
-    const userAddress = inlineAddress
-      || req.body.address
-      || req.user.addresses?.[addressIndex]
-      || req.user.addresses?.[0];
+    const userAddress = req.user.addresses[addressIndex] || req.user.addresses[0];
 
     let razorpayOrderId = null;
     if (paymentMethod !== 'cod') {
@@ -528,13 +502,13 @@ app.get('/api/admin/analytics', adminAuth, async (req, res) => {
 });
 
 // POST /api/admin/products
-app.post('/api/admin/products', adminAuth, async (req, res) => {
+app.post('/api/admin/products', async (req, res) => {
   const product = await Product.create(req.body);
   res.status(201).json({ product });
 });
 
 // PATCH /api/admin/products/:id
-app.patch('/api/admin/products/:id', adminAuth, async (req, res) => {
+app.patch('/api/admin/products/:id', async (req, res) => {
   const product = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true });
   res.json({ product });
 });
