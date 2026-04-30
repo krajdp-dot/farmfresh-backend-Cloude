@@ -92,40 +92,48 @@ const Order = mongoose.model('Order', OrderSchema);
 
 // ── HELPERS ───────────────────────────────────────────────────
 
-// Send SMS via Fast2SMS
-async function sendSMS(phone, message) {
-  if (!process.env.FAST2SMS_API_KEY) return;
+// Send OTP via Fast2SMS (route=otp — no DLT needed)
+async function sendOtpSMS(phone, otp) {
+  const apiKey = process.env.FAST2SMS_API_KEY;
+  if (!apiKey) return;
   try {
     const res = await fetch('https://www.fast2sms.com/dev/bulkV2', {
       method: 'POST',
-      headers: { authorization: process.env.FAST2SMS_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ route: 'q', message, numbers: phone, flash: '0' }),
+      headers: { authorization: apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        route: 'otp',
+        variables_values: otp,
+        numbers: phone,
+        flash: '0',
+      }),
     });
     const data = await res.json();
-    console.log('SMS sent:', data);
-  } catch (e) { console.error('SMS failed:', e); }
+    console.log('OTP SMS result:', data);
+  } catch (e) { console.error('OTP SMS failed:', e); }
 }
 
-// Notify owner via WhatsApp (Fast2SMS WhatsApp route)
-async function notifyOwnerWhatsApp(order) {
-  const ownerPhone = process.env.OWNER_PHONE;
-  if (!ownerPhone || !process.env.FAST2SMS_API_KEY) return;
-  const itemsList = order.items.map(i => `${i.name} x${i.qty}`).join(', ');
-  const message = `🛒 New Farm Fresh Order!\n👤 ${order.customerName}\n📱 ${order.phone}\n📦 ${itemsList}\n💰 ₹${order.total} (${order.paymentMethod.toUpperCase()})\n📍 ${order.address?.fullAddress}`;
+// Notify owner via Telegram
+async function notifyOwnerTelegram(order) {
+  const TELEGRAM_TOKEN = '8703112237:AAGK_OHusDHFZiYlpKc098XOAR1RkBKIcf4';
+  const CHAT_ID = '8797240896';
+  const itemsList = order.items.map(i => `  • ${i.name} ×${i.qty} — ₹${i.price * i.qty}`).join('\n');
+  const message =
+    `🛒 *New Order — Farm Fresh!*\n\n` +
+    `👤 *${order.customerName}*\n` +
+    `📱 ${order.phone}\n` +
+    `📍 ${order.address?.fullAddress}\n\n` +
+    `📦 *Items:*\n${itemsList}\n\n` +
+    `💰 *Total: ₹${order.total}* (${order.paymentMethod.toUpperCase()})\n` +
+    `🕐 Slot: ${order.deliverySlot || 'Today, 6–9 PM'}`;
   try {
-    // WhatsApp via Fast2SMS
-    const res = await fetch('https://www.fast2sms.com/dev/whatsapp', {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ authorization: process.env.FAST2SMS_API_KEY, to: ownerPhone, message, type: 'text' }),
+      body: JSON.stringify({ chat_id: CHAT_ID, text: message, parse_mode: 'Markdown' }),
     });
     const data = await res.json();
-    console.log('WhatsApp notify:', data);
-  } catch (e) {
-    // Fallback to SMS
-    console.log('WhatsApp failed, falling back to SMS');
-    await sendSMS(ownerPhone, message);
-  }
+    console.log('Telegram notify:', data.ok ? '✅ Sent' : data);
+  } catch (e) { console.error('Telegram notify failed:', e); }
 }
 
 // ── AUTH MIDDLEWARE ───────────────────────────────────────────
@@ -154,19 +162,8 @@ app.post('/api/auth/send-otp', async (req, res) => {
       return res.status(400).json({ error: 'Invalid phone number' });
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     otpStore.set(phone, { otp, expires: Date.now() + 5 * 60 * 1000 });
-    console.log(`OTP for ${phone}: ${otp}`);
-    // Send OTP via Fast2SMS
-    if (process.env.FAST2SMS_API_KEY) {
-      try {
-        const res2 = await fetch('https://www.fast2sms.com/dev/bulkV2', {
-          method: 'POST',
-          headers: { authorization: process.env.FAST2SMS_API_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ route: 'otp', variables_values: otp, numbers: phone, flash: '0' }),
-        });
-        const d = await res2.json();
-        console.log('OTP SMS:', d);
-      } catch (e) { console.error('OTP SMS failed:', e); }
-    }
+    console.log(`OTP for ${phone}: ${otp}`); // visible in Render logs
+    await sendOtpSMS(phone, otp);
     res.json({ success: true, message: 'OTP sent' });
   } catch (err) { res.status(500).json({ error: 'Failed to send OTP' }); }
 });
@@ -244,8 +241,8 @@ app.post('/api/orders', async (req, res) => {
       discount = 80; user.hasUsedFirstOrderCoupon = true; await user.save();
     }
 
-    const deliveryFee = subtotal >= 299 ? 0 : 29; // Free above ₹299
-    const platformFee = 0; // Waived (joining bonus)
+    const deliveryFee = subtotal >= 299 ? 0 : 29;
+    const platformFee = 0;
     const total = Math.max(0, subtotal - discount + deliveryFee + platformFee);
 
     let razorpayOrderId = null;
@@ -268,8 +265,8 @@ app.post('/api/orders', async (req, res) => {
 
     await User.findByIdAndUpdate(user._id, { $inc: { totalOrders: 1 } });
 
-    // Notify owner on WhatsApp
-    notifyOwnerWhatsApp(order).catch(console.error);
+    // Notify owner on Telegram
+    notifyOwnerTelegram(order).catch(console.error);
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
   } catch (err) {
