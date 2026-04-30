@@ -119,7 +119,7 @@ const Subscription = mongoose.model('Subscription', SubscriptionSchema);
 async function sendOtpSMS(phone, otp) {
   const apiKey = 'b458247b-448b-11f1-9800-0200cd936042';
   try {
-    const res = await fetch(`https://2factor.in/API/V1/${apiKey}/SMS/${phone}/${otp}/OTP1`);
+  const res = await fetch(`https://2factor.in/API/V1/${apiKey}/SMS/${phone}/AUTOGEN`);
     const data = await res.json();
     console.log('OTP SMS result:', data);
   } catch (e) { console.error('OTP SMS failed:', e); }
