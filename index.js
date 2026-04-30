@@ -86,45 +86,49 @@ const OrderSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+const SubscriptionSchema = new mongoose.Schema({
+  customerName: String,
+  phone: { type: String, required: true, index: true },
+  address: { fullAddress: String, pincode: String },
+  basketItems: [{
+    itemId: String,
+    name: String,
+    emoji: String,
+    qty: Number,
+    unit: String,
+    price: Number,
+  }],
+  frequency: { type: String, enum: ['weekly', 'monthly'], default: 'weekly' },
+  deliveryDay: { type: String, default: 'Saturday' },
+  payType: { type: String, enum: ['upfront', 'per_delivery'], default: 'upfront' },
+  basketTotal: Number,
+  upfrontTotal: Number,
+  status: { type: String, enum: ['active', 'paused', 'cancelled'], default: 'active' },
+  nextDelivery: Date,
+  createdAt: { type: Date, default: Date.now },
+});
+
 const User = mongoose.model('User', UserSchema);
 const Product = mongoose.model('Product', ProductSchema);
 const Order = mongoose.model('Order', OrderSchema);
+const Subscription = mongoose.model('Subscription', SubscriptionSchema);
 
 // ── HELPERS ───────────────────────────────────────────────────
 
-// Send OTP via Fast2SMS (route=otp — no DLT needed)
+// Send OTP via 2Factor.in (no DLT needed)
 async function sendOtpSMS(phone, otp) {
-  const apiKey = process.env.FAST2SMS_API_KEY;
-  if (!apiKey) return;
+  const apiKey = 'b458247b-448b-11f1-9800-0200cd936042';
   try {
-    const res = await fetch('https://www.fast2sms.com/dev/bulkV2', {
-      method: 'POST',
-      headers: { authorization: apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        route: 'otp',
-        variables_values: otp,
-        numbers: phone,
-        flash: '0',
-      }),
-    });
+    const res = await fetch(`https://2factor.in/API/V1/${apiKey}/SMS/${phone}/${otp}/OTP1`);
     const data = await res.json();
     console.log('OTP SMS result:', data);
   } catch (e) { console.error('OTP SMS failed:', e); }
 }
 
 // Notify owner via Telegram
-async function notifyOwnerTelegram(order) {
+async function notifyOwnerTelegram(message) {
   const TELEGRAM_TOKEN = '8703112237:AAGK_OHusDHFZiYlpKc098XOAR1RkBKIcf4';
   const CHAT_ID = '8797240896';
-  const itemsList = order.items.map(i => `  • ${i.name} ×${i.qty} — ₹${i.price * i.qty}`).join('\n');
-  const message =
-    `🛒 *New Order — Farm Fresh!*\n\n` +
-    `👤 *${order.customerName}*\n` +
-    `📱 ${order.phone}\n` +
-    `📍 ${order.address?.fullAddress}\n\n` +
-    `📦 *Items:*\n${itemsList}\n\n` +
-    `💰 *Total: ₹${order.total}* (${order.paymentMethod.toUpperCase()})\n` +
-    `🕐 Slot: ${order.deliverySlot || 'Today, 6–9 PM'}`;
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: 'POST',
@@ -162,7 +166,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
       return res.status(400).json({ error: 'Invalid phone number' });
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     otpStore.set(phone, { otp, expires: Date.now() + 5 * 60 * 1000 });
-    console.log(`OTP for ${phone}: ${otp}`); // visible in Render logs
+    console.log(`OTP for ${phone}: ${otp}`);
     await sendOtpSMS(phone, otp);
     res.json({ success: true, message: 'OTP sent' });
   } catch (err) { res.status(500).json({ error: 'Failed to send OTP' }); }
@@ -265,8 +269,17 @@ app.post('/api/orders', async (req, res) => {
 
     await User.findByIdAndUpdate(user._id, { $inc: { totalOrders: 1 } });
 
-    // Notify owner on Telegram
-    notifyOwnerTelegram(order).catch(console.error);
+    // Telegram notification
+    const itemsList = validatedItems.map(i => `  • ${i.name} ×${i.qty} — ₹${i.price * i.qty}`).join('\n');
+    const msg =
+      `🛒 *New Order — Farm Fresh!*\n\n` +
+      `👤 *${order.customerName}*\n` +
+      `📱 ${order.phone}\n` +
+      `📍 ${order.address?.fullAddress}\n\n` +
+      `📦 *Items:*\n${itemsList}\n\n` +
+      `💰 *Total: ₹${order.total}* (${order.paymentMethod.toUpperCase()})\n` +
+      `🕐 Slot: ${order.deliverySlot || 'Today, 6–9 PM'}`;
+    notifyOwnerTelegram(msg).catch(console.error);
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
   } catch (err) {
@@ -302,7 +315,66 @@ app.post('/api/payments/verify', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Verification error' }); }
 });
 
-// ── ROUTES: ADMIN ────────────────────────────────────────────
+// ── ROUTES: SUBSCRIPTIONS ─────────────────────────────────────
+app.post('/api/subscriptions', async (req, res) => {
+  try {
+    const { customerName, phone, address, basketItems, frequency, deliveryDay, payType, basketTotal, upfrontTotal } = req.body;
+    if (!phone || !address?.fullAddress || !basketItems?.length)
+      return res.status(400).json({ error: 'Missing required fields' });
+
+    const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const targetDay = days.indexOf(deliveryDay);
+    const now = new Date();
+    const daysUntil = (targetDay - now.getDay() + 7) % 7 || 7;
+    const nextDelivery = new Date(now);
+    nextDelivery.setDate(now.getDate() + daysUntil);
+
+    const subscription = await Subscription.create({
+      customerName, phone, address, basketItems,
+      frequency, deliveryDay, payType,
+      basketTotal, upfrontTotal, nextDelivery, status: 'active',
+    });
+
+    const itemsList = basketItems.map(i => `  • ${i.emoji} ${i.name} x${i.qty}${i.unit}`).join('\n');
+    const msg =
+      `🧺 *New Subscription — Farm Fresh!*\n\n` +
+      `👤 *${customerName}*\n` +
+      `📱 ${phone}\n` +
+      `📍 ${address.fullAddress}\n\n` +
+      `📦 *Basket:*\n${itemsList}\n\n` +
+      `🔁 *${frequency}* every ${deliveryDay}\n` +
+      `💰 ₹${basketTotal}/delivery\n` +
+      `📅 First delivery: ${nextDelivery.toDateString()}`;
+    notifyOwnerTelegram(msg).catch(console.error);
+
+    res.status(201).json({ success: true, subscription });
+  } catch (err) {
+    console.error('Subscription error:', err);
+    res.status(500).json({ error: 'Failed to create subscription' });
+  }
+});
+
+app.get('/api/subscriptions/:phone', async (req, res) => {
+  const subs = await Subscription.find({ phone: req.params.phone, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 });
+  res.json({ subscriptions: subs });
+});
+
+app.patch('/api/subscriptions/:id/pause', async (req, res) => {
+  const sub = await Subscription.findByIdAndUpdate(req.params.id, { status: 'paused' }, { new: true });
+  res.json({ success: true, subscription: sub });
+});
+
+app.patch('/api/subscriptions/:id/resume', async (req, res) => {
+  const sub = await Subscription.findByIdAndUpdate(req.params.id, { status: 'active' }, { new: true });
+  res.json({ success: true, subscription: sub });
+});
+
+app.delete('/api/subscriptions/:id', async (req, res) => {
+  await Subscription.findByIdAndUpdate(req.params.id, { status: 'cancelled' });
+  res.json({ success: true });
+});
+
+// ── ROUTES: ADMIN ─────────────────────────────────────────────
 app.post('/api/admin/products', async (req, res) => {
   try {
     const product = await Product.create(req.body);
@@ -340,6 +412,11 @@ app.get('/api/admin/analytics', async (req, res) => {
     User.countDocuments(),
   ]);
   res.json({ todayOrders: todayOrders.length, todayGMV: todayOrders.reduce((s, o) => s + (o.total || 0), 0), totalOrders, totalUsers });
+});
+
+app.get('/api/admin/subscriptions', async (req, res) => {
+  const subs = await Subscription.find().sort({ createdAt: -1 }).limit(100);
+  res.json({ subscriptions: subs });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
