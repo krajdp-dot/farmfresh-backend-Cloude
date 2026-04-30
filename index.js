@@ -119,10 +119,16 @@ const Subscription = mongoose.model('Subscription', SubscriptionSchema);
 async function sendOtpSMS(phone, otp) {
   const apiKey = 'b458247b-448b-11f1-9800-0200cd936042';
   try {
-  const res = await fetch(`https://2factor.in/API/V1/${apiKey}/SMS/${phone}/AUTOGEN`);
+    const url = `https://2factor.in/API/V1/${apiKey}/SMS/+91${phone}/${otp}`;
+    const res = await fetch(url);
     const data = await res.json();
-    console.log('OTP SMS result:', data);
-  } catch (e) { console.error('OTP SMS failed:', e); }
+    console.log('OTP SMS result:', JSON.stringify(data));
+    if (data.Status !== 'Success') {
+      console.error('2Factor error:', data);
+    }
+  } catch (e) {
+    console.error('OTP SMS failed:', e);
+  }
 }
 
 // Notify owner via Telegram
