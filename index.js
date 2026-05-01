@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -36,6 +37,26 @@ if (!admin.apps.length) {
     ),
   });
   console.log('✅ Firebase Admin initialized');
+}
+
+// ── NODEMAILER ────────────────────────────────────────────────
+const mailer = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_PASS,
+  },
+});
+
+async function notifyOwnerEmail(order) {
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) return;
+  const items = order.items.map(i => `${i.name} x${i.qty} — Rs.${i.price * i.qty}`).join('\n');
+  await mailer.sendMail({
+    from: `"Farm Fresh Orders" <${process.env.GMAIL_USER}>`,
+    to: process.env.GMAIL_USER,
+    subject: `New Order from ${order.customerName || order.phone} — Rs.${order.total}`,
+    text: `New order received!\n\nName: ${order.customerName || 'N/A'}\nPhone: ${order.phone}\nTotal: Rs.${order.total} (${order.paymentMethod?.toUpperCase()})\nSlot: ${order.deliverySlot}\nAddress: ${order.address?.fullAddress}\n\nItems:\n${items}`,
+  });
 }
 
 // ── SCHEMAS ──────────────────────────────────────────────────
@@ -274,6 +295,7 @@ app.post('/api/orders', async (req, res) => {
       `*Total: Rs.${order.total}* (${order.paymentMethod.toUpperCase()})\n` +
       `Slot: ${order.deliverySlot || 'Today, 6-9 PM'}`;
     notifyOwnerTelegram(msg).catch(console.error);
+    notifyOwnerEmail(order).catch(err => console.error('Email notify error:', err));
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
   } catch (err) {
@@ -418,3 +440,4 @@ app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Farm Fresh API on port ${PORT}`));
 module.exports = app;
+
