@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const admin = require('firebase-admin');
 require('dotenv').config();
 
 const app = express();
@@ -26,6 +27,16 @@ try {
     console.log('✅ Razorpay initialized');
   }
 } catch (e) { console.log('Razorpay not configured'); }
+
+// ── FIREBASE ADMIN ────────────────────────────────────────────
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(
+      JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+    ),
+  });
+  console.log('✅ Firebase Admin initialized');
+}
 
 // ── SCHEMAS ──────────────────────────────────────────────────
 const UserSchema = new mongoose.Schema({
@@ -115,20 +126,10 @@ const Subscription = mongoose.model('Subscription', SubscriptionSchema);
 
 // ── HELPERS ───────────────────────────────────────────────────
 
-// Send OTP via 2Factor.in (no DLT needed)
-async function sendOtpSMS(phone, otp) {
-  const apiKey = 'b458247b-448b-11f1-9800-0200cd936042';
-  try {
-    const res = await fetch(`https://2factor.in/API/V1/${apiKey}/SMS/${phone}/${otp}/OTP1`);
-    const data = await res.json();
-    console.log('OTP SMS result:', data);
-  } catch (e) { console.error('OTP SMS failed:', e); }
-}
-
 // Notify owner via Telegram
 async function notifyOwnerTelegram(message) {
-  const TELEGRAM_TOKEN = '8703112237:AAGK_OHusDHFZiYlpKc098XOAR1RkBKIcf4';
-  const CHAT_ID = '8797240896';
+  const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || '8703112237:AAGK_OHusDHFZiYlpKc098XOAR1RkBKIcf4';
+  const CHAT_ID = process.env.TELEGRAM_CHAT_ID || '8797240896';
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: 'POST',
@@ -153,40 +154,34 @@ const auth = async (req, res, next) => {
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// In-memory OTP store
-const otpStore = new Map();
-
 // ── ROUTES: AUTH ──────────────────────────────────────────────
-app.get('/', (req, res) => res.json({ success: true, message: 'Farm Fresh API 🚀' }));
+app.get('/', (req, res) => res.json({ success: true, message: 'Farm Fresh API' }));
 
-app.post('/api/auth/send-otp', async (req, res) => {
+app.post('/api/auth/verify-firebase-token', async (req, res) => {
   try {
-    const { phone } = req.body;
-    if (!phone || !/^[6-9]\d{9}$/.test(phone))
-      return res.status(400).json({ error: 'Invalid phone number' });
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(phone, { otp, expires: Date.now() + 5 * 60 * 1000 });
-    console.log(`OTP for ${phone}: ${otp}`);
-    await sendOtpSMS(phone, otp);
-    res.json({ success: true, message: 'OTP sent' });
-  } catch (err) { res.status(500).json({ error: 'Failed to send OTP' }); }
-});
-
-app.post('/api/auth/verify-otp', async (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-    const stored = otpStore.get(phone);
-    if (!stored || stored.otp !== otp || Date.now() > stored.expires)
-      return res.status(400).json({ error: 'Invalid or expired OTP' });
-    otpStore.delete(phone);
+    const { idToken } = req.body;
+    if (!idToken) return res.status(400).json({ error: 'No token provided' });
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const phone = decoded.phone_number?.replace('+91', '');
+    if (!phone) return res.status(400).json({ error: 'No phone in token' });
     let user = await User.findOne({ phone });
     const isNew = !user;
     if (!user) {
-      user = await User.create({ phone, referralCode: 'FF' + Math.random().toString(36).substr(2, 6).toUpperCase() });
+      user = await User.create({
+        phone,
+        referralCode: 'FF' + Math.random().toString(36).substr(2, 6).toUpperCase(),
+      });
     }
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'farmfresh_secret', { expiresIn: '30d' });
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET || 'farmfresh_secret',
+      { expiresIn: '30d' }
+    );
     res.json({ success: true, token, user, isNew });
-  } catch (err) { res.status(500).json({ error: 'Verification failed' }); }
+  } catch (err) {
+    console.error('Firebase verify error:', err);
+    res.status(401).json({ error: 'Invalid Firebase token' });
+  }
 });
 
 app.patch('/api/auth/profile', auth, async (req, res) => {
@@ -262,23 +257,22 @@ app.post('/api/orders', async (req, res) => {
       paymentMethod: paymentMethod || 'cod',
       paymentStatus: 'pending',
       razorpayOrderId,
-      deliverySlot: deliverySlot || 'Today, 6–9 PM',
+      deliverySlot: deliverySlot || 'Today, 6-9 PM',
       status: 'placed',
       timeline: [{ status: 'placed', note: 'Order received', timestamp: new Date() }],
     });
 
     await User.findByIdAndUpdate(user._id, { $inc: { totalOrders: 1 } });
 
-    // Telegram notification
-    const itemsList = validatedItems.map(i => `  • ${i.name} ×${i.qty} — ₹${i.price * i.qty}`).join('\n');
+    const itemsList = validatedItems.map(i => `  - ${i.name} x${i.qty} - Rs.${i.price * i.qty}`).join('\n');
     const msg =
-      `🛒 *New Order — Farm Fresh!*\n\n` +
-      `👤 *${order.customerName}*\n` +
-      `📱 ${order.phone}\n` +
-      `📍 ${order.address?.fullAddress}\n\n` +
-      `📦 *Items:*\n${itemsList}\n\n` +
-      `💰 *Total: ₹${order.total}* (${order.paymentMethod.toUpperCase()})\n` +
-      `🕐 Slot: ${order.deliverySlot || 'Today, 6–9 PM'}`;
+      `*New Order - Farm Fresh!*\n\n` +
+      `*${order.customerName}*\n` +
+      `Ph: ${order.phone}\n` +
+      `Addr: ${order.address?.fullAddress}\n\n` +
+      `*Items:*\n${itemsList}\n\n` +
+      `*Total: Rs.${order.total}* (${order.paymentMethod.toUpperCase()})\n` +
+      `Slot: ${order.deliverySlot || 'Today, 6-9 PM'}`;
     notifyOwnerTelegram(msg).catch(console.error);
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
@@ -335,16 +329,16 @@ app.post('/api/subscriptions', async (req, res) => {
       basketTotal, upfrontTotal, nextDelivery, status: 'active',
     });
 
-    const itemsList = basketItems.map(i => `  • ${i.emoji} ${i.name} x${i.qty}${i.unit}`).join('\n');
+    const itemsList = basketItems.map(i => `  - ${i.name} x${i.qty}${i.unit}`).join('\n');
     const msg =
-      `🧺 *New Subscription — Farm Fresh!*\n\n` +
-      `👤 *${customerName}*\n` +
-      `📱 ${phone}\n` +
-      `📍 ${address.fullAddress}\n\n` +
-      `📦 *Basket:*\n${itemsList}\n\n` +
-      `🔁 *${frequency}* every ${deliveryDay}\n` +
-      `💰 ₹${basketTotal}/delivery\n` +
-      `📅 First delivery: ${nextDelivery.toDateString()}`;
+      `*New Subscription - Farm Fresh!*\n\n` +
+      `*${customerName}*\n` +
+      `Ph: ${phone}\n` +
+      `Addr: ${address.fullAddress}\n\n` +
+      `*Basket:*\n${itemsList}\n\n` +
+      `*${frequency}* every ${deliveryDay}\n` +
+      `Rs.${basketTotal}/delivery\n` +
+      `First delivery: ${nextDelivery.toDateString()}`;
     notifyOwnerTelegram(msg).catch(console.error);
 
     res.status(201).json({ success: true, subscription });
@@ -422,6 +416,5 @@ app.get('/api/admin/subscriptions', async (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Farm Fresh API on port ${PORT}`));
+app.listen(PORT, () => console.log(`Farm Fresh API on port ${PORT}`));
 module.exports = app;
-
