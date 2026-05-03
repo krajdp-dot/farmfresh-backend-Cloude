@@ -177,6 +177,9 @@ const auth = async (req, res, next) => {
 
 // ── ROUTES: AUTH ──────────────────────────────────────────────
 app.get('/', (req, res) => res.json({ success: true, message: 'Farm Fresh API' }));
+app.get('/api/ping', (req, res) => res.json({ ok: true })); // 
+module.exports = app;
+require('./keepalive'); // ← add this
 
 app.post('/api/auth/verify-firebase-token', async (req, res) => {
   try {
