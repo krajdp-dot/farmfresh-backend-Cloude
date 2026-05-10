@@ -97,24 +97,25 @@ const SubscriptionSchema = new mongoose.Schema({
   nextDelivery: Date, createdAt: { type: Date, default: Date.now },
 });
 
-// ── ANALYTICS SCHEMA ──────────────────────────────────────────
 const AnalyticsEventSchema = new mongoose.Schema({
   event:     { type: String, required: true, index: true },
   sessionId: { type: String, index: true },
   path:      String,
   device:    { type: String, enum: ['mobile', 'desktop'], default: 'mobile' },
-  name:      String,   // for product_click
-  total:     String,   // for order_placed
+  name:      String,
+  total:     String,
   createdAt: { type: Date, default: Date.now, index: true },
 });
 
-const User            = mongoose.model('User',            UserSchema);
-const Product         = mongoose.model('Product',         ProductSchema);
-const Order           = mongoose.model('Order',           OrderSchema);
-const Subscription    = mongoose.model('Subscription',    SubscriptionSchema);
-const AnalyticsEvent  = mongoose.model('AnalyticsEvent',  AnalyticsEventSchema);
+const User           = mongoose.model('User',           UserSchema);
+const Product        = mongoose.model('Product',        ProductSchema);
+const Order          = mongoose.model('Order',          OrderSchema);
+const Subscription   = mongoose.model('Subscription',   SubscriptionSchema);
+const AnalyticsEvent = mongoose.model('AnalyticsEvent', AnalyticsEventSchema);
 
 // ── NOTIFY HELPERS ────────────────────────────────────────────
+
+// 1. Telegram
 async function notifyTelegram(message) {
   const token  = process.env.TELEGRAM_TOKEN   || '8703112237:AAGK_OHusDHFZiYlpKc098XOAR1RkBKIcf4';
   const chatId = process.env.TELEGRAM_CHAT_ID || '8797240896';
@@ -126,6 +127,7 @@ async function notifyTelegram(message) {
   } catch (e) { console.error('Telegram failed:', e.message); }
 }
 
+// 2. Owner email → krajdp@gmail.com + GMAIL_USER
 async function notifyOwnerEmail(order) {
   if (!mailer) return;
   const shortId = 'FF' + order._id.toString().slice(-6).toUpperCase();
@@ -134,47 +136,59 @@ async function notifyOwnerEmail(order) {
       from:    `"Farm Fresh Orders" <${process.env.GMAIL_USER}>`,
       to:      [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '),
       subject: `🛒 New Order ${shortId} — Rs.${order.total} | ${order.customerName || order.phone}`,
-      html: `<div style="font-family:-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px;background:#f7f8fa;border-radius:12px">
-        <div style="background:#22c55e;padding:18px 24px;border-radius:10px;margin-bottom:20px">
-          <h2 style="margin:0;color:#fff;font-size:18px">🛒 New Order — Farm Fresh</h2>
-          <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px">${shortId}</p>
-        </div>
-        <div style="background:#fff;padding:20px;border-radius:10px;margin-bottom:12px">
-          <p style="margin:0 0 6px"><strong>Customer:</strong> ${order.customerName || '—'}</p>
-          <p style="margin:0 0 6px"><strong>Phone:</strong> ${order.phone}</p>
-          <p style="margin:0 0 6px"><strong>Address:</strong> ${order.address?.fullAddress || '—'}</p>
-          <p style="margin:0 0 6px"><strong>Slot:</strong> ${order.deliverySlot || '—'}</p>
-          <p style="margin:0"><strong>Payment:</strong> ${(order.paymentMethod || '').toUpperCase()}</p>
-        </div>
-        <div style="background:#fff;padding:20px;border-radius:10px;margin-bottom:12px">
-          <p style="margin:0 0 10px;font-weight:600">Items</p>
-          ${order.items.map(i => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f0f0f0"><span style="color:#6b7280">${i.name} × ${i.qty}</span><span>Rs.${i.price * i.qty}</span></div>`).join('')}
-          <div style="display:flex;justify-content:space-between;margin-top:10px;font-weight:700;font-size:16px">
-            <span>Total</span><span style="color:#22c55e">Rs.${order.total}</span>
+      html: `
+        <div style="font-family:-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px;background:#f7f8fa;border-radius:12px">
+          <div style="background:#22c55e;padding:18px 24px;border-radius:10px;margin-bottom:20px">
+            <h2 style="margin:0;color:#fff;font-size:18px">🛒 New Order — Farm Fresh</h2>
+            <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px">${shortId}</p>
           </div>
+          <div style="background:#fff;padding:20px;border-radius:10px;margin-bottom:12px">
+            <p style="margin:0 0 6px"><strong>Customer:</strong> ${order.customerName || '—'}</p>
+            <p style="margin:0 0 6px"><strong>Phone:</strong> ${order.phone}</p>
+            <p style="margin:0 0 6px"><strong>Address:</strong> ${order.address?.fullAddress || '—'}</p>
+            <p style="margin:0 0 6px"><strong>Slot:</strong> ${order.deliverySlot || '—'}</p>
+            <p style="margin:0"><strong>Payment:</strong> ${(order.paymentMethod || '').toUpperCase()}</p>
+          </div>
+          <div style="background:#fff;padding:20px;border-radius:10px;margin-bottom:12px">
+            <p style="margin:0 0 10px;font-weight:600">Items</p>
+            ${order.items.map(i => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f0f0f0"><span style="color:#6b7280">${i.name} × ${i.qty}</span><span>Rs.${i.price * i.qty}</span></div>`).join('')}
+            <div style="display:flex;justify-content:space-between;margin-top:10px;font-weight:700;font-size:16px">
+              <span>Total</span><span style="color:#22c55e">Rs.${order.total}</span>
+            </div>
+          </div>
+          <p style="text-align:center;font-size:11px;color:#9ca3af">Farm Fresh · Bhagalpur, Bihar · lovefarmfresh.in</p>
         </div>
-        <p style="text-align:center;font-size:11px;color:#9ca3af">Farm Fresh · Bhagalpur, Bihar · lovefarmfresh.in</p>
-      </div>`,
+      `,
     });
     console.log(`✅ Owner email sent for ${shortId}`);
   } catch (e) { console.error('Owner email failed:', e.message); }
 }
 
-async function sendSMS(phones, message) {
-  const apiKey = process.env.FAST2SMS_API_KEY;
-  if (!apiKey) return;
-  const numbers = phones.map(p => p.replace(/\D/g, '').replace(/^91/, '')).filter(p => p.length === 10).join(',');
-  if (!numbers) return;
+// 3. Green API WhatsApp
+// Instance: 7107614670
+// Token:    7775f31a840e462b9174289d8d6c381c340e75cd8a48445282
+// API URL:  https://7107.api.greenapi.com
+const GREENAPI_ID    = process.env.GREENAPI_ID    || '7107614670';
+const GREENAPI_TOKEN = process.env.GREENAPI_TOKEN || '7775f31a840e462b9174289d8d6c381c340e75cd8a48445282';
+const GREENAPI_URL   = process.env.GREENAPI_URL   || 'https://7107.api.greenapi.com';
+
+async function sendWhatsApp(phone10digit, message) {
+  // chatId format for Green API: 91XXXXXXXXXX@c.us
+  const chatId = `91${phone10digit}@c.us`;
+  const url    = `${GREENAPI_URL}/waInstance${GREENAPI_ID}/sendMessage/${GREENAPI_TOKEN}`;
   try {
-    const res = await fetch('https://www.fast2sms.com/dev/bulkV2', {
-      method: 'POST',
-      headers: { authorization: apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ route: 'q', message, numbers }),
+    const res = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ chatId, message }),
     });
     const data = await res.json();
-    if (data.return) console.log(`✅ SMS sent to ${numbers}`);
-    else console.error('Fast2SMS error:', JSON.stringify(data));
-  } catch (e) { console.error('Fast2SMS failed:', e.message); }
+    if (data.idMessage) {
+      console.log(`✅ WhatsApp sent to ${phone10digit}: ${data.idMessage}`);
+    } else {
+      console.error('Green API error:', JSON.stringify(data));
+    }
+  } catch (e) { console.error('WhatsApp failed:', e.message); }
 }
 
 // ── AUTH MIDDLEWARE ───────────────────────────────────────────
@@ -195,7 +209,6 @@ app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get('/health',   (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 // ── ANALYTICS ─────────────────────────────────────────────────
-// Receive event from frontend
 app.post('/api/analytics/event', async (req, res) => {
   try {
     const { event, sessionId, path, device, name, total } = req.body;
@@ -205,49 +218,42 @@ app.post('/api/analytics/event', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Admin analytics summary
 app.get('/api/admin/analytics/visits', async (req, res) => {
   try {
     const { days = 7 } = req.query;
     const since = new Date(); since.setDate(since.getDate() - Number(days));
-
     const events = await AnalyticsEvent.find({ createdAt: { $gte: since } }).lean();
 
-    // Daily visits (unique sessions per day)
-    const dailyMap: Record<string, Set<string>> = {};
-    const dailyEvents: Record<string, number> = {};
+    const dailyMap = {};
+    const dailyEventsCount = {};
     events.forEach(e => {
       const day = new Date(e.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-      if (!dailyMap[day]) { dailyMap[day] = new Set(); dailyEvents[day] = 0; }
+      if (!dailyMap[day]) { dailyMap[day] = new Set(); dailyEventsCount[day] = 0; }
       if (e.sessionId) dailyMap[day].add(e.sessionId);
-      dailyEvents[day]++;
+      dailyEventsCount[day]++;
     });
 
     const dailyVisits = Object.entries(dailyMap)
-      .map(([date, sessions]) => ({ date, visitors: sessions.size, events: dailyEvents[date] }));
+      .map(([date, sessions]) => ({ date, visitors: sessions.size, events: dailyEventsCount[date] }));
 
-    // Page popularity
-    const pageCount: Record<string, number> = {};
+    const pageCount = {};
     events.filter(e => e.event === 'pageview').forEach(e => {
       const p = e.path || '/'; pageCount[p] = (pageCount[p] || 0) + 1;
     });
     const topPages = Object.entries(pageCount).sort((a, b) => b[1] - a[1]).slice(0, 8)
       .map(([page, views]) => ({ page, views }));
 
-    // Device split
     const mobile  = events.filter(e => e.device === 'mobile').length;
     const desktop = events.filter(e => e.device === 'desktop').length;
 
-    // Funnel
     const uniqueSessions = new Set(events.map(e => e.sessionId)).size;
     const cartOpens      = new Set(events.filter(e => e.event === 'cart_open').map(e => e.sessionId)).size;
     const checkouts      = new Set(events.filter(e => e.event === 'checkout_start').map(e => e.sessionId)).size;
-    const orders         = new Set(events.filter(e => e.event === 'order_placed').map(e => e.sessionId)).size;
+    const ordersPlaced   = new Set(events.filter(e => e.event === 'order_placed').map(e => e.sessionId)).size;
 
-    // Top clicked products
-    const productClicks: Record<string, number> = {};
+    const productClicks = {};
     events.filter(e => e.event === 'product_click' && e.name).forEach(e => {
-      productClicks[e.name!] = (productClicks[e.name!] || 0) + 1;
+      productClicks[e.name] = (productClicks[e.name] || 0) + 1;
     });
     const topProducts = Object.entries(productClicks).sort((a, b) => b[1] - a[1]).slice(0, 6)
       .map(([name, clicks]) => ({ name, clicks }));
@@ -259,10 +265,10 @@ app.get('/api/admin/analytics/visits', async (req, res) => {
       topPages,
       deviceSplit: { mobile, desktop },
       funnel: [
-        { step: 'Visited',    count: uniqueSessions },
-        { step: 'Cart Open',  count: cartOpens },
-        { step: 'Checkout',   count: checkouts },
-        { step: 'Ordered',    count: orders },
+        { step: 'Visited',   count: uniqueSessions },
+        { step: 'Cart Open', count: cartOpens },
+        { step: 'Checkout',  count: checkouts },
+        { step: 'Ordered',   count: ordersPlaced },
       ],
       topProducts,
     });
@@ -401,19 +407,24 @@ app.post('/api/orders', async (req, res) => {
     const shortId   = 'FF' + order._id.toString().slice(-6).toUpperCase();
     const itemsList = validatedItems.map(i => `  - ${i.name} x${i.qty} — Rs.${i.price * i.qty}`).join('\n');
 
-    const ownerSMS =
-      `New Order ${shortId}\n${order.customerName} | ${order.phone}\n` +
-      `Rs.${order.total} (${(order.paymentMethod || '').toUpperCase()})\n${order.address?.fullAddress}`;
+    const ownerMsg =
+      `🛒 *New Order — Farm Fresh*\n\n` +
+      `*${order.customerName}*\n📱 ${order.phone}\n📍 ${order.address?.fullAddress}\n\n` +
+      `*Items:*\n${itemsList}\n\n` +
+      `*Total: Rs.${order.total}* (${(order.paymentMethod || '').toUpperCase()})\n` +
+      `🕐 ${order.deliverySlot}\n🆔 ${shortId}`;
 
-    const customerSMS =
-      `Order confirmed! Farm Fresh\nOrder ID: ${shortId}\nTotal: Rs.${total}\n` +
-      `Slot: ${deliverySlot || 'As scheduled'}\nTrack: lovefarmfresh.in\nHelp: 7480062299`;
+    const customerMsg =
+      `✅ Order confirmed! Farm Fresh\n\n` +
+      `Order ID: *${shortId}*\nTotal: Rs.${total}\nSlot: ${deliverySlot || 'As scheduled'}\n\n` +
+      `Track your order at lovefarmfresh.in\nHelp: 7480062299`;
 
+    // Fire all notifications in parallel
     Promise.all([
-      notifyTelegram(`*🛒 New Order — Farm Fresh*\n\n*${order.customerName}*\n📱 ${order.phone}\n📍 ${order.address?.fullAddress}\n\n*Items:*\n${itemsList}\n\n*Total: Rs.${order.total}* (${(order.paymentMethod || '').toUpperCase()})\n🕐 ${order.deliverySlot}\n🆔 ${shortId}`).catch(console.error),
+      notifyTelegram(ownerMsg).catch(console.error),
       notifyOwnerEmail(order).catch(console.error),
-      sendSMS(['7480062299'], ownerSMS).catch(console.error),
-      sendSMS([phone], customerSMS).catch(console.error),
+      sendWhatsApp('7480062299', ownerMsg).catch(console.error),       // owner
+      sendWhatsApp(phone, customerMsg).catch(console.error),           // customer
     ]);
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
@@ -471,13 +482,22 @@ app.post('/api/subscriptions', async (req, res) => {
     });
 
     const itemsList = basketItems.map(i => `  - ${i.name} x${i.qty} ${i.unit}`).join('\n');
-    const goldMsg =
-      `*👑 New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n` +
-      `*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
+    const goldOwnerMsg =
+      `👑 *New Gold Subscription — Farm Fresh*\n\n` +
+      `*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n` +
+      `*Basket:*\n${itemsList}\n\n` +
+      `*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
+
+    const goldCustomerMsg =
+      `👑 Gold subscription confirmed! Farm Fresh\n\n` +
+      `${frequency} delivery every ${deliveryDay}\n` +
+      `Total: Rs.${upfrontTotal}\nFirst delivery: ${nextDelivery.toDateString()}\n\n` +
+      `Questions? 7480062299`;
 
     Promise.all([
-      notifyTelegram(goldMsg).catch(console.error),
-      sendSMS(['7480062299'], `New Gold Sub!\n${customerName} | ${phone}\n${frequency} Rs.${basketTotal}`).catch(console.error),
+      notifyTelegram(goldOwnerMsg).catch(console.error),
+      sendWhatsApp('7480062299', goldOwnerMsg).catch(console.error),
+      sendWhatsApp(phone, goldCustomerMsg).catch(console.error),
       mailer ? mailer.sendMail({
         from: `"Farm Fresh Gold" <${process.env.GMAIL_USER}>`,
         to: [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '),
@@ -549,3 +569,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Farm Fresh API running on port ${PORT}`));
 require('./keepalive');
 module.exports = app;
+
