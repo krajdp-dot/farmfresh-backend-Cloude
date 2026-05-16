@@ -66,7 +66,9 @@ const ProductSchema = new mongoose.Schema({
   price: { type: Number, required: true }, mrp: { type: Number, required: true },
   stock: { type: Number, default: 999 }, isAvailable: { type: Boolean, default: true },
   comingSoon: { type: Boolean, default: false },
-  availableIn: { type: String, default: '' }, // e.g. "2-3 days", "next week"
+  availableIn: { type: String, default: '' },
+  quantityPresets: { type: [String], default: [] }, // e.g. ["500g","1 kg","2 kg"]
+  baseUnit: { type: String, default: '' },          // base unit for custom qty scaling e.g. "kg"
   tags: [String], certifications: [String],
   rating: { type: Number, default: 4.5 }, totalSold: { type: Number, default: 0 },
 });
