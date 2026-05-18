@@ -66,9 +66,7 @@ const ProductSchema = new mongoose.Schema({
   price: { type: Number, required: true }, mrp: { type: Number, required: true },
   stock: { type: Number, default: 999 }, isAvailable: { type: Boolean, default: true },
   comingSoon: { type: Boolean, default: false },
-  availableIn: { type: String, default: '' },
-  quantityPresets: { type: [String], default: [] },
-  baseUnit: { type: String, default: '' },
+  availableIn: { type: String, default: '' }, // e.g. "2-3 days", "next week"
   tags: [String], certifications: [String],
   rating: { type: Number, default: 4.5 }, totalSold: { type: Number, default: 0 },
 });
@@ -109,40 +107,26 @@ const AnalyticsEventSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now, index: true },
 });
 
-const SettingsSchema = new mongoose.Schema({
-  key:                   { type: String, default: 'global', unique: true },
-  deliveryWaived:        { type: Boolean, default: false },
-  deliveryFee:           { type: Number, default: 29 },
-  freeDeliveryThreshold: { type: Number, default: 299 },
-  ownerWhatsApp:         { type: String, default: '7255020727' },
-  supportPhone:          { type: String, default: '7480062299' },
-  storeOpen:             { type: Boolean, default: true },
-  announcement:          { type: String, default: '' },
-});
-
 const User           = mongoose.model('User',           UserSchema);
 const Product        = mongoose.model('Product',        ProductSchema);
 const Order          = mongoose.model('Order',          OrderSchema);
 const Subscription   = mongoose.model('Subscription',   SubscriptionSchema);
 const AnalyticsEvent = mongoose.model('AnalyticsEvent', AnalyticsEventSchema);
-const Settings       = mongoose.model('Settings',       SettingsSchema);
 
 // ── GREEN API CONFIG ──────────────────────────────────────────
 const GREENAPI_ID    = process.env.GREENAPI_ID    || '7107614670';
 const GREENAPI_TOKEN = process.env.GREENAPI_TOKEN || '7775f31a840e462b9174289d8d6c381c340e75cd8a48445282';
 const GREENAPI_URL   = process.env.GREENAPI_URL   || 'https://7107.api.greenapi.com';
+const OWNER_PHONE    = '7255020727'; // Farm Fresh WhatsApp Business number
 
-async function getSettings() {
-  try {
-    return await Settings.findOneAndUpdate(
-      { key: 'global' }, {}, { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).lean();
-  } catch { return {}; }
-}
+// ── ADMIN AUTH MIDDLEWARE ─────────────────────────────────────
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 
-async function getOwnerPhone() {
-  const s = await getSettings();
-  return (s?.ownerWhatsApp || process.env.OWNER_PHONE || '7255020727').replace(/\D/g, '');
+function adminAuth(req, res, next) {
+  if (!ADMIN_API_KEY) return next(); // no key set = open (dev mode)
+  const key = req.headers['x-admin-key'] || req.query.adminKey;
+  if (key !== ADMIN_API_KEY) return res.status(401).json({ error: 'Unauthorized' });
+  next();
 }
 
 // ── STATUS MESSAGE PRESETS ────────────────────────────────────
@@ -251,7 +235,7 @@ app.post('/api/analytics/event', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/admin/analytics/visits', async (req, res) => {
+app.get('/api/admin/analytics/visits', adminAuth, async (req, res) => {
   try {
     const { days = 7 } = req.query;
     const since = new Date(); since.setDate(since.getDate() - Number(days));
@@ -372,20 +356,13 @@ app.post('/api/orders', async (req, res) => {
     if (!user) user = await User.create({ phone, name: customerName, referralCode: 'FF' + Math.random().toString(36).substr(2,6).toUpperCase() });
     else if (customerName && !user.name) { user.name = customerName; await user.save(); }
 
-    // Check store open
-    const sett = await getSettings();
-    if (sett.storeOpen === false) return res.status(503).json({ error: 'Store is temporarily closed. Please try again later.' });
-
     let subtotal = 0;
     const validatedItems = [];
     for (const item of items) {
-      const rawId  = String(item.productId).split('_')[0];
-      const product = await Product.findById(rawId);
+      const product = await Product.findById(item.productId);
       if (!product || !product.isAvailable) return res.status(400).json({ error: `${product?.name || 'Item'} is unavailable` });
-      const itemPrice = (item.price && item.price > 0) ? item.price : product.price;
-      const itemUnit  = item.unit || product.unit;
-      subtotal += itemPrice * item.qty;
-      validatedItems.push({ productId: product._id, name: product.name, qty: item.qty, price: itemPrice, mrp: product.mrp, unit: itemUnit });
+      subtotal += product.price * item.qty;
+      validatedItems.push({ productId: product._id, name: product.name, qty: item.qty, price: product.price, mrp: product.mrp, unit: product.unit });
       await Product.findByIdAndUpdate(product._id, { $inc: { totalSold: item.qty } });
     }
 
@@ -394,8 +371,7 @@ app.post('/api/orders', async (req, res) => {
       discount = 80; user.hasUsedFirstOrderCoupon = true; await user.save();
     }
 
-    const feeThreshold = sett.freeDeliveryThreshold ?? 299;
-    const deliveryFee  = (sett.deliveryWaived || subtotal >= feeThreshold) ? 0 : (sett.deliveryFee ?? 29);
+    const deliveryFee = subtotal >= 299 ? 0 : 29;
     const total = Math.max(0, subtotal - discount + deliveryFee);
 
     let razorpayOrderId = null;
@@ -426,12 +402,11 @@ app.post('/api/orders', async (req, res) => {
       `✅ *Order Placed — Farm Fresh*\n\nHi ${customerName}! Your order *${shortId}* has been placed.\n\n` +
       `💰 Total: Rs.${total}\n🕐 Slot: ${deliverySlot || 'As scheduled'}\n\nWe'll confirm shortly.\nTrack: lovefarmfresh.in\nHelp: 7480062299`;
 
-    const ownerPhone = await getOwnerPhone();
-    await Promise.all([
-      notifyTelegram(ownerMsg).catch(e => console.error('Telegram:', e.message)),
-      notifyOwnerEmail(order).catch(e => console.error('Email:', e.message)),
-      sendWhatsApp(ownerPhone, ownerMsg).catch(e => console.error('WA owner:', e.message)),
-      sendWhatsApp(phone, customerMsg).catch(e => console.error('WA customer:', e.message)),
+    Promise.all([
+      notifyTelegram(ownerMsg).catch(console.error),
+      notifyOwnerEmail(order).catch(console.error),
+      sendWhatsApp(OWNER_PHONE, ownerMsg).catch(console.error),
+      sendWhatsApp(phone, customerMsg).catch(console.error),
     ]);
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
@@ -485,11 +460,10 @@ app.post('/api/subscriptions', async (req, res) => {
     const itemsList = basketItems.map(i => `  - ${i.name} x${i.qty} ${i.unit}`).join('\n');
     const goldOwnerMsg = `👑 *New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
     const goldCustomerMsg = `👑 *Gold Subscription Confirmed — Farm Fresh*\n\nHi ${customerName}! Your Gold subscription is active.\n\n📅 ${frequency} delivery every ${deliveryDay}\n💰 Rs.${upfrontTotal}\n🗓 First delivery: ${nextDelivery.toDateString()}\n\nQuestions? 7480062299`;
-    const ownerPhone2 = await getOwnerPhone();
-    await Promise.all([
-      notifyTelegram(goldOwnerMsg).catch(e => console.error('Telegram:', e.message)),
-      sendWhatsApp(ownerPhone2, goldOwnerMsg).catch(e => console.error('WA owner:', e.message)),
-      sendWhatsApp(phone, goldCustomerMsg).catch(e => console.error('WA customer:', e.message)),
+    Promise.all([
+      notifyTelegram(goldOwnerMsg).catch(console.error),
+      sendWhatsApp(OWNER_PHONE, goldOwnerMsg).catch(console.error),
+      sendWhatsApp(phone, goldCustomerMsg).catch(console.error),
       mailer ? mailer.sendMail({ from: `"Farm Fresh Gold" <${process.env.GMAIL_USER}>`, to: [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '), subject: `👑 New Gold Subscription — ${customerName} | ${frequency}`, html: `<div style="font-family:sans-serif;padding:24px;max-width:520px"><h2 style="color:#C9A227">👑 New Gold Subscription</h2><p><b>Customer:</b> ${customerName}</p><p><b>Phone:</b> ${phone}</p><p><b>Address:</b> ${address.fullAddress}</p><p><b>Frequency:</b> ${frequency} — ${deliveryDay}</p><p><b>Total:</b> Rs.${upfrontTotal}</p><pre style="background:#f9f9f9;padding:12px;border-radius:8px">${itemsList}</pre></div>` }).catch(console.error) : Promise.resolve(),
     ]);
     res.status(201).json({ success: true, subscription });
@@ -506,17 +480,17 @@ app.patch('/api/subscriptions/:id/resume', async (req, res) => { const s = await
 app.delete('/api/subscriptions/:id',       async (req, res) => { await Subscription.findByIdAndUpdate(req.params.id, { status: 'cancelled' }); res.json({ success: true }); });
 
 // ── ADMIN ─────────────────────────────────────────────────────
-app.post('/api/admin/products',       async (req, res) => { try { const p = await Product.create(req.body); res.status(201).json({ product: p }); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.patch('/api/admin/products/:id',  async (req, res) => { try { const p = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json({ product: p }); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.delete('/api/admin/products/:id', async (req, res) => { try { await Product.findByIdAndDelete(req.params.id); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/admin/products',       adminAuth, async (req, res) => { try { const p = await Product.create(req.body); res.status(201).json({ product: p }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.patch('/api/admin/products/:id',  adminAuth, async (req, res) => { try { const p = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json({ product: p }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.delete('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndDelete(req.params.id); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
 
-app.get('/api/admin/orders', async (req, res) => {
+app.get('/api/admin/orders', adminAuth, async (req, res) => {
   try { const orders = await Order.find().sort({ createdAt: -1 }).limit(100).lean(); res.json({ orders }); }
   catch (err) { res.status(500).json({ error: 'Failed to fetch orders' }); }
 });
 
 // ── STATUS UPDATE + AUTO WhatsApp notify ──────────────────────
-app.patch('/api/admin/orders/:id/status', async (req, res) => {
+app.patch('/api/admin/orders/:id/status', adminAuth, async (req, res) => {
   try {
     const { status, note, sendWhatsAppNotify = true } = req.body;
     const order = await Order.findByIdAndUpdate(req.params.id,
@@ -527,9 +501,10 @@ app.patch('/api/admin/orders/:id/status', async (req, res) => {
     if (sendWhatsAppNotify && order?.phone) {
       const msg = getStatusMessage(status, order);
       if (msg) {
-        sendWhatsApp(order.phone, msg).catch(e => console.error('WA customer:', e.message));
-        const ownerNotif = `Order FF${order._id.toString().slice(-6).toUpperCase()} -> ${status.toUpperCase()}\nCustomer: ${order.customerName} (${order.phone})`;
-        getOwnerPhone().then(op => sendWhatsApp(op, ownerNotif).catch(e => console.error('WA owner:', e.message)));
+        sendWhatsApp(order.phone, msg).catch(console.error);
+        // Also notify owner on their business number
+        const ownerNotif = `📋 Order *FF${order._id.toString().slice(-6).toUpperCase()}* → *${status.toUpperCase()}*\nCustomer: ${order.customerName} (${order.phone})`;
+        sendWhatsApp(OWNER_PHONE, ownerNotif).catch(console.error);
       }
     }
 
@@ -538,7 +513,7 @@ app.patch('/api/admin/orders/:id/status', async (req, res) => {
 });
 
 // ── Manual WhatsApp send from admin ──────────────────────────
-app.post('/api/admin/orders/:id/whatsapp', async (req, res) => {
+app.post('/api/admin/orders/:id/whatsapp', adminAuth, async (req, res) => {
   try {
     const { message } = req.body;
     const order = await Order.findById(req.params.id).lean();
@@ -549,7 +524,7 @@ app.post('/api/admin/orders/:id/whatsapp', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/admin/analytics', async (req, res) => {
+app.get('/api/admin/analytics', adminAuth, async (req, res) => {
   try {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const [todayOrders, totalOrders, totalUsers, totalSubs] = await Promise.all([
@@ -561,62 +536,10 @@ app.get('/api/admin/analytics', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed to fetch analytics' }); }
 });
 
-app.get('/api/admin/subscriptions', async (req, res) => {
+app.get('/api/admin/subscriptions', adminAuth, async (req, res) => {
   try { const subs = await Subscription.find().sort({ createdAt: -1 }).limit(100).lean(); res.json({ subscriptions: subs }); }
   catch (err) { res.status(500).json({ error: 'Failed to fetch subscriptions' }); }
 });
-
-// ── Manual WhatsApp from admin (order specific) ──────────────
-// (already exists above)
-
-// ── PUBLIC SETTINGS (for frontend) ───────────────────────────
-app.get('/api/settings', async (req, res) => {
-  try {
-    const s = await getSettings();
-    res.json({
-      deliveryWaived:        s.deliveryWaived        ?? false,
-      deliveryFee:           s.deliveryFee           ?? 29,
-      freeDeliveryThreshold: s.freeDeliveryThreshold ?? 299,
-      supportPhone:          s.supportPhone          || '7480062299',
-      storeOpen:             s.storeOpen             ?? true,
-      announcement:          s.announcement          || '',
-    });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── ADMIN SETTINGS ────────────────────────────────────────────
-app.get('/api/admin/settings', async (req, res) => {
-  try { res.json({ settings: await getSettings() }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.patch('/api/admin/settings', async (req, res) => {
-  try {
-    const allowed = ['deliveryWaived','deliveryFee','freeDeliveryThreshold','ownerWhatsApp','supportPhone','storeOpen','announcement'];
-    const update = {};
-    for (const key of allowed) if (req.body[key] !== undefined) update[key] = req.body[key];
-    const s = await Settings.findOneAndUpdate(
-      { key: 'global' }, { $set: update }, { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).lean();
-    res.json({ success: true, settings: s });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── Test WhatsApp ─────────────────────────────────────────────
-app.post('/api/admin/test-whatsapp', async (req, res) => {
-  try {
-    const ownerPhone = await getOwnerPhone();
-    const phone  = req.body.phone || ownerPhone;
-    const msg    = req.body.message || 'Farm Fresh WhatsApp test OK';
-    const chatId = `91${phone.replace(/\D/g,'').replace(/^91/,'')}@c.us`;
-    const url    = `${GREENAPI_URL}/waInstance${GREENAPI_ID}/sendMessage/${GREENAPI_TOKEN}`;
-    const waRes  = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ chatId, message: msg }) });
-    const data   = await waRes.json();
-    res.json({ chatId, response: data, ownerPhone });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── ANALYTICS VISITS ──────────────────────────────────────────
 
 // ── START ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
