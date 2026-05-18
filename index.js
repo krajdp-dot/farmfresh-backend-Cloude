@@ -416,12 +416,7 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-const order = await Order.findById(req.params.id)
-const id = req.params.id;
-const order = mongoose.Types.ObjectId.isValid(id)
-  ? await Order.findById(id)
-  : await Order.findOne({ _id: { $regex: id + '$', $options: 'i' } });
-
+app.get('/api/orders/:id', async (req, res) => {
   try {
     const order = await Order.findById(req.params.id).select('-userId -razorpayPaymentId').lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
