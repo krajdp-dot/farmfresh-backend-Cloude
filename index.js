@@ -66,7 +66,9 @@ const ProductSchema = new mongoose.Schema({
   price: { type: Number, required: true }, mrp: { type: Number, required: true },
   stock: { type: Number, default: 999 }, isAvailable: { type: Boolean, default: true },
   comingSoon: { type: Boolean, default: false },
-  availableIn: { type: String, default: '' }, // e.g. "2-3 days", "next week"
+  availableIn: { type: String, default: '' },
+  quantityPresets: { type: [String], default: [] },
+  baseUnit: { type: String, default: '' },
   tags: [String], certifications: [String],
   rating: { type: Number, default: 4.5 }, totalSold: { type: Number, default: 0 },
 });
@@ -107,23 +109,50 @@ const AnalyticsEventSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now, index: true },
 });
 
+const SettingsSchema = new mongoose.Schema({
+  key:                   { type: String, default: 'global', unique: true },
+  deliveryWaived:        { type: Boolean, default: false },
+  deliveryFee:           { type: Number,  default: 29 },
+  freeDeliveryThreshold: { type: Number,  default: 299 },
+  ownerWhatsApp:         { type: String,  default: '7255020727' },
+  supportPhone:          { type: String,  default: '7480062299' },
+  storeOpen:             { type: Boolean, default: true },
+  announcement:          { type: String,  default: '' },
+});
+
 const User           = mongoose.model('User',           UserSchema);
 const Product        = mongoose.model('Product',        ProductSchema);
 const Order          = mongoose.model('Order',          OrderSchema);
 const Subscription   = mongoose.model('Subscription',   SubscriptionSchema);
 const AnalyticsEvent = mongoose.model('AnalyticsEvent', AnalyticsEventSchema);
+const Settings       = mongoose.model('Settings',       SettingsSchema);
 
 // ── GREEN API CONFIG ──────────────────────────────────────────
-const GREENAPI_ID    = process.env.GREENAPI_ID    || '7107614670';
-const GREENAPI_TOKEN = process.env.GREENAPI_TOKEN || '7775f31a840e462b9174289d8d6c381c340e75cd8a48445282';
+const GREENAPI_ID    = process.env.GREENAPI_ID    || '';
+const GREENAPI_TOKEN = process.env.GREENAPI_TOKEN || '';
 const GREENAPI_URL   = process.env.GREENAPI_URL   || 'https://7107.api.greenapi.com';
-const OWNER_PHONE    = '7255020727'; // Farm Fresh WhatsApp Business number
+
+// ── SETTINGS HELPERS ──────────────────────────────────────────
+async function getSettings() {
+  try {
+    return await Settings.findOneAndUpdate(
+      { key: 'global' }, {}, { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+  } catch { return {}; }
+}
+
+async function getOwnerPhone() {
+  const s = await getSettings();
+  const raw = s?.ownerWhatsApp || process.env.OWNER_PHONE || '7255020727';
+  const digits = raw.replace(/\D/g, '');
+  return digits.length >= 12 ? digits.replace(/^91/, '') : digits;
+}
 
 // ── ADMIN AUTH MIDDLEWARE ─────────────────────────────────────
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || null;
 
 function adminAuth(req, res, next) {
-  if (!ADMIN_API_KEY) return next(); // no key set = open (dev mode)
+  if (!ADMIN_API_KEY) return next();
   const key = req.headers['x-admin-key'] || req.query.adminKey;
   if (key !== ADMIN_API_KEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
@@ -136,20 +165,19 @@ function getStatusMessage(status, order) {
   const slot    = order.deliverySlot || '';
   const presets = {
     confirmed:  `✅ *Order Confirmed — Farm Fresh*\n\nHi ${name}! Your order *${shortId}* has been confirmed.\n\n🕐 Delivery slot: ${slot}\n📍 We'll deliver to your address.\n\nTrack: lovefarmfresh.in\nHelp: 7480062299`,
-    packing:    `📦 *Your Order is Being Packed — Farm Fresh*\n\nHi ${name}! Great news — your order *${shortId}* is being packed with fresh produce right now.\n\n🌿 Quality checked & sealed fresh.\n\nTrack: lovefarmfresh.in`,
-    dispatched: `🚀 *Out for Delivery — Farm Fresh*\n\nHi ${name}! Your order *${shortId}* is on its way!\n\n🕐 Expected: ${slot}\n\nPlease be available at your delivery address. Track: lovefarmfresh.in\nHelp: 7480062299`,
+    packing:    `📦 *Your Order is Being Packed — Farm Fresh*\n\nHi ${name}! Your order *${shortId}* is being packed with fresh produce right now.\n\n🌿 Quality checked & sealed fresh.\n\nTrack: lovefarmfresh.in`,
+    dispatched: `🚀 *Out for Delivery — Farm Fresh*\n\nHi ${name}! Your order *${shortId}* is on its way!\n\n🕐 Expected: ${slot}\n\nPlease be available. Track: lovefarmfresh.in\nHelp: 7480062299`,
     delivered:  `🎉 *Order Delivered — Farm Fresh*\n\nHi ${name}! Your order *${shortId}* has been delivered.\n\n🌱 Enjoy your fresh produce!\nWe'd love your feedback — reply to this message.\n\nOrder again: lovefarmfresh.in`,
-    cancelled:  `❌ *Order Cancelled — Farm Fresh*\n\nHi ${name}, your order *${shortId}* has been cancelled.\n\nIf this was a mistake or you need help, contact us:\n📞 7480062299\n🌐 lovefarmfresh.in`,
+    cancelled:  `❌ *Order Cancelled — Farm Fresh*\n\nHi ${name}, your order *${shortId}* has been cancelled.\n\nNeed help? 📞 7480062299 | 🌐 lovefarmfresh.in`,
   };
   return presets[status] || null;
 }
 
 // ── NOTIFY HELPERS ────────────────────────────────────────────
-
-// 1. Telegram
 async function notifyTelegram(message) {
-  const token  = process.env.TELEGRAM_TOKEN   || '8703112237:AAGK_OHusDHFZiYlpKc098XOAR1RkBKIcf4';
-  const chatId = process.env.TELEGRAM_CHAT_ID || '8797240896';
+  const token  = process.env.TELEGRAM_TOKEN   || '';
+  const chatId = process.env.TELEGRAM_CHAT_ID || '';
+  if (!token || !chatId) return;
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -158,7 +186,6 @@ async function notifyTelegram(message) {
   } catch (e) { console.error('Telegram failed:', e.message); }
 }
 
-// 2. Owner email
 async function notifyOwnerEmail(order) {
   if (!mailer) return;
   const shortId = 'FF' + order._id.toString().slice(-6).toUpperCase();
@@ -193,17 +220,19 @@ async function notifyOwnerEmail(order) {
   } catch (e) { console.error('Owner email failed:', e.message); }
 }
 
-// 3. Green API WhatsApp
 async function sendWhatsApp(phone10digit, message) {
-  const chatId = `91${phone10digit.replace(/\D/g, '').replace(/^91/, '')}@c.us`;
-  const url    = `${GREENAPI_URL}/waInstance${GREENAPI_ID}/sendMessage/${GREENAPI_TOKEN}`;
+  if (!GREENAPI_ID || !GREENAPI_TOKEN) return;
+  const digits  = phone10digit.replace(/\D/g, '');
+  const phone10 = digits.length >= 12 ? digits.replace(/^91/, '') : digits;
+  const chatId  = `91${phone10}@c.us`;
+  const url     = `${GREENAPI_URL}/waInstance${GREENAPI_ID}/sendMessage/${GREENAPI_TOKEN}`;
   try {
     const res  = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chatId, message }),
     });
     const data = await res.json();
-    if (data.idMessage) console.log(`✅ WhatsApp sent to ${phone10digit}`);
+    if (data.idMessage) console.log(`✅ WhatsApp sent to ${phone10}`);
     else console.error('Green API error:', JSON.stringify(data));
   } catch (e) { console.error('WhatsApp failed:', e.message); }
 }
@@ -213,7 +242,7 @@ const auth = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'No token' });
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'farmfresh_super_secret_2024');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'changeme');
     const user = await User.findById(decoded.userId);
     if (!user || user.isBlocked) return res.status(401).json({ error: 'Unauthorized' });
     req.user = user; next();
@@ -224,6 +253,21 @@ const auth = async (req, res, next) => {
 app.get('/',         (req, res) => res.json({ success: true, message: 'Farm Fresh API' }));
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get('/health',   (req, res) => res.json({ status: 'ok', time: new Date() }));
+
+// ── PUBLIC SETTINGS (for frontend) ───────────────────────────
+app.get('/api/settings', async (req, res) => {
+  try {
+    const s = await getSettings();
+    res.json({
+      deliveryWaived:        s.deliveryWaived        ?? false,
+      deliveryFee:           s.deliveryFee           ?? 29,
+      freeDeliveryThreshold: s.freeDeliveryThreshold ?? 299,
+      supportPhone:          s.supportPhone          || '7480062299',
+      storeOpen:             s.storeOpen             ?? true,
+      announcement:          s.announcement          || '',
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 // ── ANALYTICS ─────────────────────────────────────────────────
 app.post('/api/analytics/event', async (req, res) => {
@@ -250,14 +294,14 @@ app.get('/api/admin/analytics/visits', adminAuth, async (req, res) => {
     const dailyVisits = Object.entries(dailyMap).map(([date, s]) => ({ date, visitors: s.size, events: dailyEvt[date] }));
     const pageCount = {};
     events.filter(e => e.event === 'pageview').forEach(e => { const p = e.path || '/'; pageCount[p] = (pageCount[p] || 0) + 1; });
-    const topPages = Object.entries(pageCount).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([page,views])=>({page,views}));
-    const mobile  = events.filter(e => e.device === 'mobile').length;
-    const desktop = events.filter(e => e.device === 'desktop').length;
-    const unique  = new Set(events.map(e => e.sessionId)).size;
-    const carts   = new Set(events.filter(e => e.event === 'cart_open').map(e => e.sessionId)).size;
-    const checks  = new Set(events.filter(e => e.event === 'checkout_start').map(e => e.sessionId)).size;
-    const ords    = new Set(events.filter(e => e.event === 'order_placed').map(e => e.sessionId)).size;
-    const prodClicks = {};
+    const topPages    = Object.entries(pageCount).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([page,views])=>({page,views}));
+    const mobile      = events.filter(e => e.device === 'mobile').length;
+    const desktop     = events.filter(e => e.device === 'desktop').length;
+    const unique      = new Set(events.map(e => e.sessionId)).size;
+    const carts       = new Set(events.filter(e => e.event === 'cart_open').map(e => e.sessionId)).size;
+    const checks      = new Set(events.filter(e => e.event === 'checkout_start').map(e => e.sessionId)).size;
+    const ords        = new Set(events.filter(e => e.event === 'order_placed').map(e => e.sessionId)).size;
+    const prodClicks  = {};
     events.filter(e => e.event === 'product_click' && e.name).forEach(e => { prodClicks[e.name] = (prodClicks[e.name]||0)+1; });
     const topProducts = Object.entries(prodClicks).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([name,clicks])=>({name,clicks}));
     res.json({ totalVisitors: unique, totalEvents: events.length, dailyVisits, topPages, deviceSplit: { mobile, desktop },
@@ -274,9 +318,10 @@ app.post('/api/auth/verify-firebase-token', async (req, res) => {
     const phone = decoded.phone_number?.replace('+91', '');
     if (!phone) return res.status(400).json({ error: 'No phone in token' });
     let user = await User.findOne({ phone });
+    const isNew = !user;
     if (!user) user = await User.create({ phone, referralCode: 'FF' + Math.random().toString(36).substr(2,6).toUpperCase() });
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'farmfresh_super_secret_2024', { expiresIn: '30d' });
-    res.json({ success: true, token, user, isNew: !user });
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'changeme', { expiresIn: '30d' });
+    res.json({ success: true, token, user, isNew });
   } catch (err) { res.status(401).json({ error: 'Invalid Firebase token' }); }
 });
 
@@ -310,7 +355,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     let user = await User.findOne({ phone });
     if (!user) user = await User.create({ phone, email, referralCode: 'FF' + Math.random().toString(36).substr(2,6).toUpperCase() });
     else if (email && !user.email) { user.email = email; await user.save(); }
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'farmfresh_super_secret_2024', { expiresIn: '30d' });
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'changeme', { expiresIn: '30d' });
     res.json({ success: true, token, user });
   } catch (err) { res.status(500).json({ error: 'Verification failed' }); }
 });
@@ -325,7 +370,7 @@ app.patch('/api/auth/profile', auth, async (req, res) => {
 app.get('/api/products', async (req, res) => {
   try {
     const { category, search, sort = 'default', limit = 50, skip = 0 } = req.query;
-    const query = { isAvailable: true };
+    const query = {};
     if (category) query.category = category;
     if (search) query.name = { $regex: search, $options: 'i' };
     const sortMap = { price_asc: { price: 1 }, price_desc: { price: -1 }, default: { totalSold: -1 } };
@@ -352,6 +397,10 @@ app.post('/api/orders', async (req, res) => {
     if (!items?.length) return res.status(400).json({ error: 'Cart is empty' });
     if (!phone || !address?.fullAddress) return res.status(400).json({ error: 'Phone and address required' });
 
+    // Check store is open
+    const sett = await getSettings();
+    if (sett.storeOpen === false) return res.status(503).json({ error: sett.announcement || 'Store is temporarily closed. Please try again later.' });
+
     let user = await User.findOne({ phone });
     if (!user) user = await User.create({ phone, name: customerName, referralCode: 'FF' + Math.random().toString(36).substr(2,6).toUpperCase() });
     else if (customerName && !user.name) { user.name = customerName; await user.save(); }
@@ -359,10 +408,14 @@ app.post('/api/orders', async (req, res) => {
     let subtotal = 0;
     const validatedItems = [];
     for (const item of items) {
-      const product = await Product.findById(item.productId);
+      // Strip preset suffix e.g. "abc123_500g" → "abc123"
+      const rawId   = String(item.productId).split('_')[0];
+      const product = await Product.findById(rawId);
       if (!product || !product.isAvailable) return res.status(400).json({ error: `${product?.name || 'Item'} is unavailable` });
-      subtotal += product.price * item.qty;
-      validatedItems.push({ productId: product._id, name: product.name, qty: item.qty, price: product.price, mrp: product.mrp, unit: product.unit });
+      const itemPrice = (item.price && item.price > 0) ? item.price : product.price;
+      const itemUnit  = item.unit || product.unit;
+      subtotal += itemPrice * item.qty;
+      validatedItems.push({ productId: product._id, name: product.name, qty: item.qty, price: itemPrice, mrp: product.mrp, unit: itemUnit });
       await Product.findByIdAndUpdate(product._id, { $inc: { totalSold: item.qty } });
     }
 
@@ -371,7 +424,8 @@ app.post('/api/orders', async (req, res) => {
       discount = 80; user.hasUsedFirstOrderCoupon = true; await user.save();
     }
 
-    const deliveryFee = subtotal >= 299 ? 0 : 29;
+    const feeThreshold = sett.freeDeliveryThreshold ?? 299;
+    const deliveryFee  = (sett.deliveryWaived || subtotal >= feeThreshold) ? 0 : (sett.deliveryFee ?? 29);
     const total = Math.max(0, subtotal - discount + deliveryFee);
 
     let razorpayOrderId = null;
@@ -402,11 +456,12 @@ app.post('/api/orders', async (req, res) => {
       `✅ *Order Placed — Farm Fresh*\n\nHi ${customerName}! Your order *${shortId}* has been placed.\n\n` +
       `💰 Total: Rs.${total}\n🕐 Slot: ${deliverySlot || 'As scheduled'}\n\nWe'll confirm shortly.\nTrack: lovefarmfresh.in\nHelp: 7480062299`;
 
-    Promise.all([
-      notifyTelegram(ownerMsg).catch(console.error),
-      notifyOwnerEmail(order).catch(console.error),
-      sendWhatsApp(OWNER_PHONE, ownerMsg).catch(console.error),
-      sendWhatsApp(phone, customerMsg).catch(console.error),
+    const ownerPhone = await getOwnerPhone();
+    await Promise.all([
+      notifyTelegram(ownerMsg).catch(e => console.error('Telegram:', e.message)),
+      notifyOwnerEmail(order).catch(e => console.error('Email:', e.message)),
+      sendWhatsApp(ownerPhone, ownerMsg).catch(e => console.error('WA owner:', e.message)),
+      sendWhatsApp(phone, customerMsg).catch(e => console.error('WA customer:', e.message)),
     ]);
 
     res.status(201).json({ success: true, order, razorpayOrderId, total });
@@ -418,7 +473,10 @@ app.post('/api/orders', async (req, res) => {
 
 app.get('/api/orders/:id', async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).select('-userId -razorpayPaymentId').lean();
+    const id    = req.params.id;
+    const order = mongoose.Types.ObjectId.isValid(id)
+      ? await Order.findById(id).select('-userId -razorpayPaymentId').lean()
+      : await Order.findOne({ _id: { $regex: id + '$', $options: 'i' } }).select('-userId -razorpayPaymentId').lean();
     if (!order) return res.status(404).json({ error: 'Order not found' });
     res.json({ order });
   } catch (err) { res.status(500).json({ error: 'Failed to fetch order' }); }
@@ -458,13 +516,14 @@ app.post('/api/subscriptions', async (req, res) => {
     const nextDelivery = new Date(now); nextDelivery.setDate(now.getDate() + daysUntil);
     const subscription = await Subscription.create({ customerName, phone, email, address, basketItems, frequency, deliveryDay: deliveryDay || 'Saturday', payType, basketTotal, upfrontTotal, nextDelivery, status: 'active' });
     const itemsList = basketItems.map(i => `  - ${i.name} x${i.qty} ${i.unit}`).join('\n');
-    const goldOwnerMsg = `👑 *New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
+    const goldOwnerMsg    = `👑 *New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
     const goldCustomerMsg = `👑 *Gold Subscription Confirmed — Farm Fresh*\n\nHi ${customerName}! Your Gold subscription is active.\n\n📅 ${frequency} delivery every ${deliveryDay}\n💰 Rs.${upfrontTotal}\n🗓 First delivery: ${nextDelivery.toDateString()}\n\nQuestions? 7480062299`;
-    Promise.all([
-      notifyTelegram(goldOwnerMsg).catch(console.error),
-      sendWhatsApp(OWNER_PHONE, goldOwnerMsg).catch(console.error),
-      sendWhatsApp(phone, goldCustomerMsg).catch(console.error),
-      mailer ? mailer.sendMail({ from: `"Farm Fresh Gold" <${process.env.GMAIL_USER}>`, to: [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '), subject: `👑 New Gold Subscription — ${customerName} | ${frequency}`, html: `<div style="font-family:sans-serif;padding:24px;max-width:520px"><h2 style="color:#C9A227">👑 New Gold Subscription</h2><p><b>Customer:</b> ${customerName}</p><p><b>Phone:</b> ${phone}</p><p><b>Address:</b> ${address.fullAddress}</p><p><b>Frequency:</b> ${frequency} — ${deliveryDay}</p><p><b>Total:</b> Rs.${upfrontTotal}</p><pre style="background:#f9f9f9;padding:12px;border-radius:8px">${itemsList}</pre></div>` }).catch(console.error) : Promise.resolve(),
+    const ownerPhone2 = await getOwnerPhone();
+    await Promise.all([
+      notifyTelegram(goldOwnerMsg).catch(e => console.error('Telegram:', e.message)),
+      sendWhatsApp(ownerPhone2, goldOwnerMsg).catch(e => console.error('WA owner:', e.message)),
+      sendWhatsApp(phone, goldCustomerMsg).catch(e => console.error('WA customer:', e.message)),
+      mailer ? mailer.sendMail({ from: `"Farm Fresh Gold" <${process.env.GMAIL_USER}>`, to: [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '), subject: `👑 New Gold Subscription — ${customerName} | ${frequency}`, html: `<div style="font-family:sans-serif;padding:24px;max-width:520px"><h2 style="color:#C9A227">👑 New Gold Subscription</h2><p><b>Customer:</b> ${customerName}</p><p><b>Phone:</b> ${phone}</p><p><b>Address:</b> ${address.fullAddress}</p><p><b>Frequency:</b> ${frequency} — ${deliveryDay}</p><p><b>Total:</b> Rs.${upfrontTotal}</p><pre style="background:#f9f9f9;padding:12px;border-radius:8px">${itemsList}</pre></div>` }).catch(e => console.error('Email:', e.message)) : Promise.resolve(),
     ]);
     res.status(201).json({ success: true, subscription });
   } catch (err) { console.error('Subscription error:', err.message); res.status(500).json({ error: 'Failed to create subscription' }); }
@@ -479,40 +538,35 @@ app.patch('/api/subscriptions/:id/pause',  async (req, res) => { const s = await
 app.patch('/api/subscriptions/:id/resume', async (req, res) => { const s = await Subscription.findByIdAndUpdate(req.params.id, { status: 'active' }, { new: true }); res.json({ success: true, subscription: s }); });
 app.delete('/api/subscriptions/:id',       async (req, res) => { await Subscription.findByIdAndUpdate(req.params.id, { status: 'cancelled' }); res.json({ success: true }); });
 
-// ── ADMIN ─────────────────────────────────────────────────────
+// ── ADMIN PRODUCTS ────────────────────────────────────────────
 app.post('/api/admin/products',       adminAuth, async (req, res) => { try { const p = await Product.create(req.body); res.status(201).json({ product: p }); } catch (e) { res.status(500).json({ error: e.message }); } });
 app.patch('/api/admin/products/:id',  adminAuth, async (req, res) => { try { const p = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json({ product: p }); } catch (e) { res.status(500).json({ error: e.message }); } });
 app.delete('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndDelete(req.params.id); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
 
+// ── ADMIN ORDERS ──────────────────────────────────────────────
 app.get('/api/admin/orders', adminAuth, async (req, res) => {
   try { const orders = await Order.find().sort({ createdAt: -1 }).limit(100).lean(); res.json({ orders }); }
   catch (err) { res.status(500).json({ error: 'Failed to fetch orders' }); }
 });
 
-// ── STATUS UPDATE + AUTO WhatsApp notify ──────────────────────
 app.patch('/api/admin/orders/:id/status', adminAuth, async (req, res) => {
   try {
     const { status, note, sendWhatsAppNotify = true } = req.body;
     const order = await Order.findByIdAndUpdate(req.params.id,
       { status, $push: { timeline: { status, note: note || `Updated to ${status}`, timestamp: new Date() } } },
       { new: true });
-
-    // Auto-send WhatsApp to customer on status change
     if (sendWhatsAppNotify && order?.phone) {
       const msg = getStatusMessage(status, order);
       if (msg) {
-        sendWhatsApp(order.phone, msg).catch(console.error);
-        // Also notify owner on their business number
-        const ownerNotif = `📋 Order *FF${order._id.toString().slice(-6).toUpperCase()}* → *${status.toUpperCase()}*\nCustomer: ${order.customerName} (${order.phone})`;
-        sendWhatsApp(OWNER_PHONE, ownerNotif).catch(console.error);
+        sendWhatsApp(order.phone, msg).catch(e => console.error('WA customer:', e.message));
+        const ownerNotif = `Order FF${order._id.toString().slice(-6).toUpperCase()} -> ${status.toUpperCase()}\nCustomer: ${order.customerName} (${order.phone})`;
+        getOwnerPhone().then(op => sendWhatsApp(op, ownerNotif).catch(e => console.error('WA owner:', e.message)));
       }
     }
-
     res.json({ success: true, order });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Manual WhatsApp send from admin ──────────────────────────
 app.post('/api/admin/orders/:id/whatsapp', adminAuth, async (req, res) => {
   try {
     const { message } = req.body;
@@ -524,6 +578,7 @@ app.post('/api/admin/orders/:id/whatsapp', adminAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── ADMIN ANALYTICS ───────────────────────────────────────────
 app.get('/api/admin/analytics', adminAuth, async (req, res) => {
   try {
     const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -539,6 +594,40 @@ app.get('/api/admin/analytics', adminAuth, async (req, res) => {
 app.get('/api/admin/subscriptions', adminAuth, async (req, res) => {
   try { const subs = await Subscription.find().sort({ createdAt: -1 }).limit(100).lean(); res.json({ subscriptions: subs }); }
   catch (err) { res.status(500).json({ error: 'Failed to fetch subscriptions' }); }
+});
+
+// ── ADMIN SETTINGS ────────────────────────────────────────────
+app.get('/api/admin/settings', adminAuth, async (req, res) => {
+  try { res.json({ settings: await getSettings() }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.patch('/api/admin/settings', adminAuth, async (req, res) => {
+  try {
+    const allowed = ['deliveryWaived','deliveryFee','freeDeliveryThreshold','ownerWhatsApp','supportPhone','storeOpen','announcement'];
+    const update = {};
+    for (const key of allowed) if (req.body[key] !== undefined) update[key] = req.body[key];
+    const s = await Settings.findOneAndUpdate(
+      { key: 'global' }, { $set: update }, { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+    res.json({ success: true, settings: s });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── TEST WHATSAPP ─────────────────────────────────────────────
+app.post('/api/admin/test-whatsapp', adminAuth, async (req, res) => {
+  try {
+    const ownerPhone = await getOwnerPhone();
+    const phone  = req.body.phone || ownerPhone;
+    const msg    = req.body.message || 'Farm Fresh WhatsApp test OK';
+    const digits  = phone.replace(/\D/g, '');
+    const phone10 = digits.length >= 12 ? digits.replace(/^91/, '') : digits;
+    const chatId  = `91${phone10}@c.us`;
+    const url     = `${GREENAPI_URL}/waInstance${GREENAPI_ID}/sendMessage/${GREENAPI_TOKEN}`;
+    const waRes   = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ chatId, message: msg }) });
+    const data    = await waRes.json();
+    res.json({ chatId, response: data, ownerPhone });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── START ─────────────────────────────────────────────────────
