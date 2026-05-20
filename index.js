@@ -464,10 +464,10 @@ app.post('/api/orders', async (req, res) => {
       sendWhatsApp(phone, customerMsg).catch(e => console.error('WA customer:', e.message)),
     ]);
 
-    res.status(201).json({ success: true, order, razorpayOrderId, total });
-  } catch (err) {
-    console.error('Order error:', err.message);
-    res.status(500).json({ error: 'Order failed. Please try again.' });
+ } catch (err) {
+    console.error('Order error full:', JSON.stringify(err));
+    console.error('Order error msg:', err?.message || err?.error?.description || String(err));
+    res.status(500).json({ error: err?.error?.description || err?.message || 'Order failed. Please try again.' });
   }
 });
 
