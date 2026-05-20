@@ -408,7 +408,6 @@ app.post('/api/orders', async (req, res) => {
     let subtotal = 0;
     const validatedItems = [];
     for (const item of items) {
-      // Strip preset suffix e.g. "abc123_500g" → "abc123"
       const rawId   = String(item.productId).split('_')[0];
       const product = await Product.findById(rawId);
       if (!product || !product.isAvailable) return res.status(400).json({ error: `${product?.name || 'Item'} is unavailable` });
@@ -456,15 +455,19 @@ app.post('/api/orders', async (req, res) => {
       `✅ *Order Placed — Farm Fresh*\n\nHi ${customerName}! Your order *${shortId}* has been placed.\n\n` +
       `💰 Total: Rs.${total}\n🕐 Slot: ${deliverySlot || 'As scheduled'}\n\nWe'll confirm shortly.\nTrack: lovefarmfresh.in\nHelp: 7480062299`;
 
+    // ✅ FIX: Fire notifications in background — don't block response
     const ownerPhone = await getOwnerPhone();
-    await Promise.all([
+    Promise.all([
       notifyTelegram(ownerMsg).catch(e => console.error('Telegram:', e.message)),
       notifyOwnerEmail(order).catch(e => console.error('Email:', e.message)),
       sendWhatsApp(ownerPhone, ownerMsg).catch(e => console.error('WA owner:', e.message)),
       sendWhatsApp(phone, customerMsg).catch(e => console.error('WA customer:', e.message)),
     ]);
 
- } catch (err) {
+    // ✅ FIX: Respond immediately after order is saved
+    res.status(201).json({ success: true, order, razorpayOrderId, total });
+
+  } catch (err) {
     console.error('Order error full:', JSON.stringify(err));
     console.error('Order error msg:', err?.message || err?.error?.description || String(err));
     res.status(500).json({ error: err?.error?.description || err?.message || 'Order failed. Please try again.' });
@@ -519,7 +522,7 @@ app.post('/api/subscriptions', async (req, res) => {
     const goldOwnerMsg    = `👑 *New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
     const goldCustomerMsg = `👑 *Gold Subscription Confirmed — Farm Fresh*\n\nHi ${customerName}! Your Gold subscription is active.\n\n📅 ${frequency} delivery every ${deliveryDay}\n💰 Rs.${upfrontTotal}\n🗓 First delivery: ${nextDelivery.toDateString()}\n\nQuestions? 7480062299`;
     const ownerPhone2 = await getOwnerPhone();
-    await Promise.all([
+    Promise.all([
       notifyTelegram(goldOwnerMsg).catch(e => console.error('Telegram:', e.message)),
       sendWhatsApp(ownerPhone2, goldOwnerMsg).catch(e => console.error('WA owner:', e.message)),
       sendWhatsApp(phone, goldCustomerMsg).catch(e => console.error('WA customer:', e.message)),
