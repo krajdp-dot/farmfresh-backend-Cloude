@@ -97,6 +97,7 @@ const SubscriptionSchema = new mongoose.Schema({
   deliveryDay: { type: String, default: 'Saturday' },
   payType: { type: String, enum: ['upfront', 'per_delivery'], default: 'upfront' },
   basketTotal: Number, upfrontTotal: Number,
+  razorpayPaymentId: String,
   status: { type: String, enum: ['active', 'paused', 'cancelled'], default: 'active' },
   nextDelivery: Date, createdAt: { type: Date, default: Date.now },
 });
@@ -254,7 +255,7 @@ app.get('/',         (req, res) => res.json({ success: true, message: 'Farm Fres
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get('/health',   (req, res) => res.json({ status: 'ok', time: new Date() }));
 
-// ── PUBLIC SETTINGS (for frontend) ───────────────────────────
+// ── PUBLIC SETTINGS ───────────────────────────────────────────
 app.get('/api/settings', async (req, res) => {
   try {
     const s = await getSettings();
@@ -397,7 +398,6 @@ app.post('/api/orders', async (req, res) => {
     if (!items?.length) return res.status(400).json({ error: 'Cart is empty' });
     if (!phone || !address?.fullAddress) return res.status(400).json({ error: 'Phone and address required' });
 
-    // Check store is open
     const sett = await getSettings();
     if (sett.storeOpen === false) return res.status(503).json({ error: sett.announcement || 'Store is temporarily closed. Please try again later.' });
 
@@ -455,7 +455,6 @@ app.post('/api/orders', async (req, res) => {
       `✅ *Order Placed — Farm Fresh*\n\nHi ${customerName}! Your order *${shortId}* has been placed.\n\n` +
       `💰 Total: Rs.${total}\n🕐 Slot: ${deliverySlot || 'As scheduled'}\n\nWe'll confirm shortly.\nTrack: lovefarmfresh.in\nHelp: 7480062299`;
 
-    // ✅ FIX: Fire notifications in background — don't block response
     const ownerPhone = await getOwnerPhone();
     Promise.all([
       notifyTelegram(ownerMsg).catch(e => console.error('Telegram:', e.message)),
@@ -464,7 +463,6 @@ app.post('/api/orders', async (req, res) => {
       sendWhatsApp(phone, customerMsg).catch(e => console.error('WA customer:', e.message)),
     ]);
 
-    // ✅ FIX: Respond immediately after order is saved
     res.status(201).json({ success: true, order, razorpayOrderId, total });
 
   } catch (err) {
@@ -493,6 +491,26 @@ app.get('/api/orders', auth, async (req, res) => {
 });
 
 // ── PAYMENTS ──────────────────────────────────────────────────
+
+// ✅ NEW — Create Razorpay order (used by Gold page)
+app.post('/api/payments/create-order', async (req, res) => {
+  try {
+    if (!razorpay) return res.status(503).json({ error: 'Razorpay not configured' });
+    const { amount } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+    const order = await razorpay.orders.create({
+      amount:   Math.round(amount * 100),
+      currency: 'INR',
+      receipt:  `ff_gold_${Date.now()}`,
+    });
+    res.json({ id: order.id, amount: order.amount, currency: order.currency });
+  } catch (err) {
+    console.error('Razorpay create order error:', JSON.stringify(err));
+    res.status(500).json({ error: err?.error?.description || 'Failed to create payment order' });
+  }
+});
+
+// Verify payment signature (used by shop orders)
 app.post('/api/payments/verify', async (req, res) => {
   try {
     const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
@@ -510,23 +528,29 @@ app.post('/api/payments/verify', async (req, res) => {
 // ── SUBSCRIPTIONS ─────────────────────────────────────────────
 app.post('/api/subscriptions', async (req, res) => {
   try {
-    const { customerName, phone, email, address, basketItems, frequency, deliveryDay, payType, basketTotal, upfrontTotal } = req.body;
+    const { customerName, phone, email, address, basketItems, frequency, deliveryDay, payType, basketTotal, upfrontTotal, razorpayPaymentId } = req.body;
     if (!phone || !address?.fullAddress || !basketItems?.length) return res.status(400).json({ error: 'Missing required fields' });
     const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
     const targetDay = days.indexOf(deliveryDay?.split(' ')[0] || deliveryDay);
     const now = new Date();
     const daysUntil = targetDay >= 0 ? (targetDay - now.getDay() + 7) % 7 || 7 : 7;
     const nextDelivery = new Date(now); nextDelivery.setDate(now.getDate() + daysUntil);
-    const subscription = await Subscription.create({ customerName, phone, email, address, basketItems, frequency, deliveryDay: deliveryDay || 'Saturday', payType, basketTotal, upfrontTotal, nextDelivery, status: 'active' });
+    const subscription = await Subscription.create({
+      customerName, phone, email, address, basketItems,
+      frequency, deliveryDay: deliveryDay || 'Saturday',
+      payType, basketTotal, upfrontTotal,
+      razorpayPaymentId: razorpayPaymentId || null,
+      nextDelivery, status: 'active',
+    });
     const itemsList = basketItems.map(i => `  - ${i.name} x${i.qty} ${i.unit}`).join('\n');
-    const goldOwnerMsg    = `👑 *New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}`;
+    const goldOwnerMsg    = `👑 *New Gold Subscription — Farm Fresh*\n\n*${customerName}*\n📱 ${phone}\n📍 ${address.fullAddress}\n\n*Basket:*\n${itemsList}\n\n*${frequency}* every ${deliveryDay}\n💰 Rs.${basketTotal}/delivery\n📅 First: ${nextDelivery.toDateString()}\n💳 Payment: ${razorpayPaymentId || 'COD'}`;
     const goldCustomerMsg = `👑 *Gold Subscription Confirmed — Farm Fresh*\n\nHi ${customerName}! Your Gold subscription is active.\n\n📅 ${frequency} delivery every ${deliveryDay}\n💰 Rs.${upfrontTotal}\n🗓 First delivery: ${nextDelivery.toDateString()}\n\nQuestions? 7480062299`;
     const ownerPhone2 = await getOwnerPhone();
     Promise.all([
       notifyTelegram(goldOwnerMsg).catch(e => console.error('Telegram:', e.message)),
       sendWhatsApp(ownerPhone2, goldOwnerMsg).catch(e => console.error('WA owner:', e.message)),
       sendWhatsApp(phone, goldCustomerMsg).catch(e => console.error('WA customer:', e.message)),
-      mailer ? mailer.sendMail({ from: `"Farm Fresh Gold" <${process.env.GMAIL_USER}>`, to: [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '), subject: `👑 New Gold Subscription — ${customerName} | ${frequency}`, html: `<div style="font-family:sans-serif;padding:24px;max-width:520px"><h2 style="color:#C9A227">👑 New Gold Subscription</h2><p><b>Customer:</b> ${customerName}</p><p><b>Phone:</b> ${phone}</p><p><b>Address:</b> ${address.fullAddress}</p><p><b>Frequency:</b> ${frequency} — ${deliveryDay}</p><p><b>Total:</b> Rs.${upfrontTotal}</p><pre style="background:#f9f9f9;padding:12px;border-radius:8px">${itemsList}</pre></div>` }).catch(e => console.error('Email:', e.message)) : Promise.resolve(),
+      mailer ? mailer.sendMail({ from: `"Farm Fresh Gold" <${process.env.GMAIL_USER}>`, to: [process.env.GMAIL_USER, 'krajdp@gmail.com'].filter(Boolean).join(', '), subject: `👑 New Gold Subscription — ${customerName} | ${frequency}`, html: `<div style="font-family:sans-serif;padding:24px;max-width:520px"><h2 style="color:#C9A227">👑 New Gold Subscription</h2><p><b>Customer:</b> ${customerName}</p><p><b>Phone:</b> ${phone}</p><p><b>Address:</b> ${address.fullAddress}</p><p><b>Frequency:</b> ${frequency} — ${deliveryDay}</p><p><b>Total:</b> Rs.${upfrontTotal}</p><p><b>Payment ID:</b> ${razorpayPaymentId || 'COD'}</p><pre style="background:#f9f9f9;padding:12px;border-radius:8px">${itemsList}</pre></div>` }).catch(e => console.error('Email:', e.message)) : Promise.resolve(),
     ]);
     res.status(201).json({ success: true, subscription });
   } catch (err) { console.error('Subscription error:', err.message); res.status(500).json({ error: 'Failed to create subscription' }); }
